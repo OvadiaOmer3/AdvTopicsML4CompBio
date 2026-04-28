@@ -59,6 +59,8 @@ def _():
         full_table,
         methylation_site_annotations,
         methylation_site_names,
+        np,
+        pd,
         plt,
         sns,
         tables,
@@ -270,7 +272,7 @@ def _(full_table, methylation_site_names):
     Y_train_binned = KBinsDiscretizer(n_bins=20,encode='ordinal').fit_transform(Y_train.to_numpy()[:,None])[:,0]
     skf = StratifiedKFold(n_splits=5,random_state=0,shuffle=True)
     skf.get_n_splits(X_train,Y_train_binned)
-    return
+    return X_test, X_train, Y_test, Y_train, Y_train_binned, skf
 
 
 @app.cell(hide_code=True)
@@ -372,6 +374,69 @@ def _(mo):
     return
 
 
+@app.cell
+def _(X_test, X_train, Y_test, Y_train, Y_train_binned, np, pd, skf):
+    # Create an sklearn pipline that:
+    #  - Imputes missing values with SimpleImputer
+    #  - Selects top-k features by correlation with age (SelectKBest and f_regression) via cross-validation on the training set
+    from wheel.vendored.packaging.specifiers import Specifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
+    from sklearn.feature_selection import SelectKBest, f_regression
+    from sklearn.model_selection import GridSearchCV
+    from sklearn.linear_model import Ridge
+
+    k_values = [5,10,20,30,50,100,500,1000]
+
+    cv_splits = list(skf.split(X_train, Y_train_binned))
+
+
+    best_models = []
+    for k in k_values:
+        pipeline = Pipeline([
+            ('imputer', SimpleImputer()),
+            ('feature_selection', SelectKBest(score_func=f_regression, k=k)),
+            ("regressor", Ridge())
+        ])
+
+        param_grid = {'regressor__alpha': np.logspace(-4, 2, 10)}
+        grid_search = GridSearchCV(
+        pipeline,
+        param_grid,
+        cv=cv_splits,
+        scoring="neg_mean_absolute_error"
+    )
+        # grid_search = GridSearchCV(pipeline, param_grid, cv=skf, scoring="neg_mean_absolute_error")
+    
+        grid_search.fit(X_train, Y_train)
+
+        best_model = grid_search.best_estimator_
+        best_performance = -grid_search.best_score_
+        print(f"Best MAE for k={k}: {best_performance:.4f} with alpha={grid_search.best_params_['regressor__alpha']}")
+        best_models.append(best_model)
+
+    # Report performance of the model on the test set in a table with error bars: std of abs error / sqrt(n_test_samples).
+    report = []
+    for k, model in zip(k_values, best_models):
+        predictions = model.predict(X_test)
+        mae = np.mean(np.abs(predictions - Y_test))
+        std_error = np.std(np.abs(predictions - Y_test)) / np.sqrt(len(Y_test))
+        report.append((k, mae, std_error))
+    report_df = pd.DataFrame(report, columns=['k', 'MAE', 'Std_Error'])
+    print(report_df)
+
+
+    return SelectKBest, SimpleImputer, best_models, cv_splits, f_regression
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The performence slightly improves along growing K, both in MAE and error bars. Allowing small groups of features the models can't grasp the required complexity expressed in the feartures to fit well. That is probably why it improves as we incease k, howerver there is a point where the improvment in performence flattens. We can see that the L2 regulation limits from choosing more features for greater values of K, which may explain why at this point the MAE decreasement is insignificant.
+    """)
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
@@ -381,11 +446,89 @@ def _(mo):
     return
 
 
+@app.cell
+def _(X_train, best_models, methylation_site_annotations, np, plt, sns):
+    # Plot feature importance for K=50 model, from the regression coefficients of the Ridge model,
+    # sort features by genome position and color labels by chromosome
+    # use methylation_site_annotations to get the chromosome and position of each feature.
+    k_features_pool = best_models[4].named_steps['feature_selection'].get_support(indices=True)
+    selected_features = X_train.columns[k_features_pool]
+    selected_annotations = methylation_site_annotations.loc[selected_features]
+    selected_annotations = selected_annotations.sort_values(['CHR', 'MAPINFO'])
+
+    # For non gradient coloring
+    selected_annotations['CHR'] = selected_annotations['CHR'].astype(int).astype(str)
+    plt.figure(figsize=(10, 6))
+
+    unique_chrs = sorted(selected_annotations['CHR'].unique())
+
+    palette = dict(zip(
+        unique_chrs,
+        sns.color_palette("tab20", n_colors=len(unique_chrs))
+    ))
+
+
+    sns.barplot(x=selected_annotations.index, y=np.abs(best_models[4].named_steps['regressor'].coef_),
+    hue=selected_annotations['CHR'], dodge=False, palette=palette)
+    plt.xticks(rotation=90)
+    plt.xlabel("CpG site")
+    plt.ylabel("Absolute regression coefficient")
+    plt.title("Feature importance for K=50 model")
+    plt.legend(title="Chromosome", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+
+
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Some chromosomes are more represented then others. chromosomes 9 and 12 arn't even chosen, and 17,18,20 for instance have single locus present with a very low importance. Chromosome 10 has 2 sites one of wich is the most important feature (twice in size from the next-important). Chromosome 3 has the most sites but with a relatively low significance, may be interesting to check their respective correlation.
+    """)
+    return
+
+
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     8.	For each of the five folds, the selected sites may be different. How many sites are found in all five folds? In at least 2 folds? Discuss the findings.
     """)
+    return
+
+
+@app.cell
+def _(
+    SelectKBest,
+    SimpleImputer,
+    X_train,
+    Y_train_binned,
+    cv_splits,
+    f_regression,
+    pd,
+):
+    # Q8: Count for each features in how many folds it was selected by SelectKBest, and create a df
+    feature_counts = pd.DataFrame(0, index=X_train.columns, columns=range(5))
+    for fold, (train_idx, val_idx) in enumerate(cv_splits):
+        X_fold_train, Y_fold_train = X_train.iloc[train_idx], Y_train_binned[train_idx]
+        # Impute missing values in the training fold
+        X_fold_train = SimpleImputer(strategy='mean').fit_transform(X_fold_train)
+        selector = SelectKBest(score_func=f_regression, k=50)
+        selector.fit(X_fold_train, Y_fold_train)
+        selected_indices = selector.get_support(indices=True)
+        feature_counts.iloc[selected_indices, fold] = 1
+    feature_counts['Total_Selected'] = feature_counts.sum(axis=1)
+
+    # show features that were selected in all 5 folds
+    consistently_selected = feature_counts[feature_counts['Total_Selected'] == 5]
+    print("No. Features selected in all 5 folds:", len(consistently_selected))
+
+
+    # show features that were selected in at least 2 folds
+    selected_at_least_2 = feature_counts[feature_counts['Total_Selected'] >= 2]
+    print("No. Features selected in at least 2 folds:", len(selected_at_least_2))
+
     return
 
 
