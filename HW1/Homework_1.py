@@ -152,7 +152,6 @@ def _(full_table, methylation_site_names, plt, sns):
 
     moderately_positive = ((0.5 > spearman_rho) & (spearman_rho > 0.25)).sum() 
     print(f"Number of CpG sites with moderate positive correlation with age: {moderately_positive}")
-
     return age, spearman_rho
 
 
@@ -284,7 +283,6 @@ def _(mo):
 
 @app.cell
 def _(full_table, plt, sns, tables):
-
     plt.figure(figsize=(15, 6))
 
     positions = []
@@ -292,16 +290,16 @@ def _(full_table, plt, sns, tables):
 
     for j, t in enumerate(tables):
         source = t.iloc[0]["Source"]
-    
+
         sns.boxplot(
             y=t["age"],
             positions=[j],
             width=0.6
         )
-    
+
         positions.append(j)
         labels.append(source)
-    
+
     # add one boxplot for all the data
     sns.boxplot(
         y=full_table["age"],
@@ -320,6 +318,14 @@ def _(full_table, plt, sns, tables):
     for j, t in enumerate(tables):
         source = t.iloc[0]["Source"]
         print(f"Number of {source} samples: {len(t)}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    4. We can see that some of the datasets have a very different distribution than the rest. like GSE103657 that consist of samples of infants, or GSE30870 that consist only of 90-100 year old patients. GSE69270 may have the same median as the avarage median across the datasets, but it has a very small variance.
+    """)
     return
 
 
